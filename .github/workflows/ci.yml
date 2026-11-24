@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install FUSE3 headers
+        run: sudo apt-get update && sudo apt-get install -y libfuse3-dev zlib1g-dev
+      - name: Build library, CLI, and FUSE3 binaries
+        run: make WITH_FUSE=1
+      - name: Run unit and synthetic filesystem image suite
+        run: make check
+      - name: Run AddressSanitizer and UndefinedBehaviorSanitizer suite
+        run: make check-asan
+
+  macos:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build library and CLI
+        run: make WITH_FUSE=0
+      - name: Run unit and synthetic filesystem image suite
+        run: make WITH_FUSE=0 check
+      - name: Run AddressSanitizer and UndefinedBehaviorSanitizer suite
+        run: make check-asan

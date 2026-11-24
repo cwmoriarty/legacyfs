@@ -1,0 +1,10 @@
+build/
+out/
+dist/
+*.o
+*.a
+*.dylib
+*.so
+*.dSYM/
+.DS_Store
+legacyfs-*.tar.gz
