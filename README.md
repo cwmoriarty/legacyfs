@@ -65,6 +65,11 @@ Mount read-only via FUSE3 (Linux) or FUSE-T (macOS):
 fuse-reiserfs disk.img /mnt/reiser
 ```
 
+## Downstream Integrations
+
+- **[Montserrat](https://github.com/cwmoriarty/montserrat):** Uses `CLegacyFS` and `legacyfs-mount` for superblock identification across 37 formats and read-only macOS FUSE-T / FSKit mounting.
+- **[TestDisk-NG](https://github.com/cwmoriarty/TestDisk-NG):** Links `liblegacyfs.a` so `[P] List Files` and `[C] Copy` can browse and recover files directly from ReiserFS, UFS/UFS2, JFS, SquashFS, EROFS, ISO9660, CramFS, ROMFS, Minix, and SysV partitions.
+
 ## License
 
 MIT License.
