@@ -19,6 +19,8 @@ jobs:
         run: make check
       - name: Run AddressSanitizer and UndefinedBehaviorSanitizer suite
         run: make check-asan
+      - name: Run corrupted-image mutation fuzzing suite
+        run: make check-fuzz
 
   macos:
     runs-on: macos-15
@@ -30,3 +32,5 @@ jobs:
         run: make WITH_FUSE=0 check
       - name: Run AddressSanitizer and UndefinedBehaviorSanitizer suite
         run: make check-asan
+      - name: Run corrupted-image mutation fuzzing suite
+        run: make check-fuzz

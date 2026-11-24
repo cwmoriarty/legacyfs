@@ -54,7 +54,10 @@ LIB_SRCS := \
 	src/fs_cramfs_romfs.c \
 	src/fs_squashfs_erofs.c \
 	src/fs_iso9660.c \
-	src/fs_ufs_jfs.c
+	src/fs_ufs_jfs.c \
+	src/fs_xfs.c \
+	src/fs_btrfs.c \
+	src/fs_udf.c
 
 LIB_OBJS := $(patsubst src/%.c,$(BUILD)/%.o,$(LIB_SRCS))
 STATIC_LIB := $(BUILD)/liblegacyfs.a
@@ -72,14 +75,17 @@ FUSE_ALIASES := \
 	fuse-erofs \
 	fuse-ufs \
 	fuse-jfs \
-	fuse-sysv
+	fuse-sysv \
+	fuse-btrfs \
+	fuse-xfs \
+	fuse-udf
 
 TARGETS := $(STATIC_LIB) $(CLI_BIN)
 ifeq ($(ENABLE_FUSE),1)
   TARGETS += $(FUSE_BIN)
 endif
 
-.PHONY: all clean check check-asan install dist
+.PHONY: all clean check check-asan check-fuzz install dist
 
 all: $(TARGETS)
 
@@ -111,6 +117,11 @@ check-asan: | $(BUILD)
 	$(CC) $(CPPFLAGS) -O1 -g -Wall -Wextra -std=c11 -fsanitize=address,undefined \
 		$(LIB_SRCS) tests/test_legacyfs.c $(LDLIBS) -o $(BUILD)/test_legacyfs_asan
 	./$(BUILD)/test_legacyfs_asan
+
+check-fuzz: | $(BUILD)
+	$(CC) $(CPPFLAGS) -O1 -g -Wall -Wextra -std=c11 -fsanitize=address,undefined \
+		$(LIB_SRCS) tests/fuzz_legacyfs.c $(LDLIBS) -o $(BUILD)/fuzz_legacyfs
+	./$(BUILD)/fuzz_legacyfs 2500
 
 install: all
 	mkdir -p "$(DESTDIR)$(PREFIX)/include" "$(DESTDIR)$(PREFIX)/lib" "$(DESTDIR)$(PREFIX)/bin"

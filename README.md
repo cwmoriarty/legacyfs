@@ -4,8 +4,11 @@
 
 ## Capabilities
 
-### Read-Only Mount and Extraction (10 Filesystem Families)
+### Read-Only Mount and Extraction (13 Filesystem Families)
 Full superblock validation, directory listing, path lookup, symlink resolution, and file reading:
+- **Btrfs** (`sys_chunk_array` and `CHUNK_TREE` logical-to-physical mapping, multi-level `FS_TREE` traversal, inline and regular extents, and transparent `zlib` decompression)
+- **XFS** (`v4` and `v5` allocation groups, shortform and block/leaf directories, `bmbt` extents, and `BMAP`/`BMA3` B+tree forks)
+- **UDF** (`1.02` through `2.60`, File Entry and Extended File Entry, OSTA CS0 8-bit and UTF-16BE filenames, inline/short/long descriptors, and `PathComponent` symlinks)
 - **ReiserFS** (`3.5` and `3.6`, balanced S+tree traversal, tail-packed direct items, and indirect blocks — removed from mainline Linux in 6.13)
 - **UFS / FFS** (`UFS1` and `UFS2` BSD Fast File System, direct and indirect blocks, fast inline symlinks)
 - **JFS** (`JFS1` IBM Journaled File System, fileset inode allocation maps, inline and B+tree directories, `xtree` file extents)
@@ -18,8 +21,8 @@ Full superblock validation, directory listing, path lookup, symlink resolution, 
 - **SysV** (System V filesystem with 24-bit packed block pointers and indirect blocks)
 
 ### Superblock and Container Identification (`legacyfs_probe`, 37 Formats Total)
-In addition to the 10 mountable families above, `legacyfs_probe` identifies and extracts metadata (version, label, UUID, block size, and capacity) for:
-`Reiser4`, `Btrfs`, `XFS`, `F2FS`, `NILFS2`, `ZFS`, `GFS2`, `OCFS2`, `BCacheFS`, `BeFS`, `HPFS`, `Amiga AFFS`, `Classic Mac HFS`, `UDF`, `VMware VMFS`, `Microsoft ReFS`, `Wii WBFS`, `Xbox FATX`, `QNX4`, `QNX6`, `JFFS2`, `UBIFS`, `LUKS1`, `LUKS2`, `LVM2`, `Linux MD RAID`, and `Linux Swap`.
+In addition to the 13 mountable families above, `legacyfs_probe` identifies and extracts metadata (version, label, UUID, block size, and capacity) for:
+`Reiser4`, `F2FS`, `NILFS2`, `ZFS`, `GFS2`, `OCFS2`, `BCacheFS`, `BeFS`, `HPFS`, `Amiga AFFS`, `Classic Mac HFS`, `VMware VMFS`, `Microsoft ReFS`, `Wii WBFS`, `Xbox FATX`, `QNX4`, `QNX6`, `JFFS2`, `UBIFS`, `LUKS1`, `LUKS2`, `LVM2`, `Linux MD RAID`, and `Linux Swap`.
 
 ## Build and Test
 
@@ -34,9 +37,10 @@ Run the synthetic filesystem image test suite and sanitizer checks:
 ```bash
 make check
 make check-asan
+make check-fuzz
 ```
 
-Install headers, `liblegacyfs.a`, `legacyfs`, `legacyfs-mount`, and per-format aliases (`fuse-reiserfs`, `fuse-ufs`, `fuse-jfs`, `fuse-squashfs`, `fuse-erofs`, `fuse-iso9660`, `fuse-cramfs`, `fuse-romfs`, `fuse-minix`, `fuse-sysv`):
+Install headers, `liblegacyfs.a`, `legacyfs`, `legacyfs-mount`, and per-format aliases (`fuse-btrfs`, `fuse-xfs`, `fuse-udf`, `fuse-reiserfs`, `fuse-ufs`, `fuse-jfs`, `fuse-squashfs`, `fuse-erofs`, `fuse-iso9660`, `fuse-cramfs`, `fuse-romfs`, `fuse-minix`, `fuse-sysv`):
 
 ```bash
 sudo make install PREFIX=/usr/local

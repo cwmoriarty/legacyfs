@@ -47,6 +47,10 @@ static void put_be32(uint8_t *p, uint32_t v) {
     p[2] = (uint8_t)((v >> 8) & 0xFFU);
     p[3] = (uint8_t)(v & 0xFFU);
 }
+static void put_be64(uint8_t *p, uint64_t v) {
+    put_be32(p, (uint32_t)(v >> 32));
+    put_be32(p + 4, (uint32_t)(v & 0xFFFFFFFFULL));
+}
 
 static void verify_file_and_link(
     const mem_img_t *img,
@@ -773,6 +777,323 @@ static void test_jfs(void) {
     free(img.data);
 }
 
+/* 11. Synthetic XFS v5 test (shortform root dir + bmbt extent file + inline symlink) */
+static void xfs_pack_bmbt(uint8_t out[16], uint64_t startoff, uint64_t startblock, uint64_t blockcount) {
+    uint64_t hi = ((startoff & ((1ULL << 54) - 1ULL)) << 9) | ((startblock >> 43) & 0x1FFULL);
+    uint64_t lo = ((startblock & ((1ULL << 43) - 1ULL)) << 21) | (blockcount & 0x1FFFFFULL);
+    put_be64(out, hi);
+    put_be64(out + 8, lo);
+}
+
+static void test_xfs(void) {
+    const uint32_t bsize = 4096;
+    const uint32_t nblocks = 64;
+    mem_img_t img = { (uint8_t *)calloc(nblocks, bsize), nblocks * bsize };
+
+    /* Superblock at 0: 4K blocks, 512B v3 dinodes (inopblog=3, agblklog=6), rootino=64 (block 8, slot 0) */
+    uint8_t *sb = img.data;
+    put_be32(sb + 0, 0x58465342U); /* XFSB */
+    put_be32(sb + 4, bsize);
+    put_be64(sb + 8, nblocks);
+    put_be64(sb + 56, 64ULL);      /* sb_rootino = 64 */
+    put_be32(sb + 84, nblocks);    /* sb_agblocks = 64 */
+    put_be32(sb + 88, 1);          /* sb_agcount = 1 */
+    put_be16(sb + 100, 0x0005U);   /* XFS v5 */
+    put_be16(sb + 104, 512U);      /* sb_inodesize = 512 */
+    memcpy(sb + 108, "XFS_ARCHIVE", 11);
+    sb[120] = 12; /* blocklog */
+    sb[123] = 3;  /* inopblog = 8 inodes/block */
+    sb[124] = 6;  /* agblklog = 64 blocks/AG */
+    put_be32(sb + 208, 0x01U);     /* INCOMPAT_FTYPE */
+
+    /* Inode 64 at block 8 + 0*512: root shortform directory */
+    uint8_t *di_root = img.data + 8 * bsize;
+    put_be16(di_root + 0, 0x494EU);
+    put_be16(di_root + 2, S_IFDIR | 0755);
+    di_root[4] = 3; /* v3 dinode -> fork at +176 */
+    di_root[5] = 1; /* LOCAL */
+    put_be32(di_root + 16, 2); /* nlink */
+
+    uint8_t *sf = di_root + 176;
+    sf[0] = 2; /* 2 entries */
+    sf[1] = 0; /* 4-byte inodes */
+    put_be32(sf + 2, 64); /* parent = 64 */
+    /* Entry 0: "srv.log" -> ino 65, ftype=1 (REG) */
+    size_t p = 6;
+    sf[p + 0] = 7; put_be16(sf + p + 1, 0x60); memcpy(sf + p + 3, "srv.log", 7); sf[p + 10] = 1; put_be32(sf + p + 11, 65);
+    p += 15;
+    /* Entry 1: "cur.lnk" -> ino 66, ftype=7 (SYMLINK) */
+    sf[p + 0] = 7; put_be16(sf + p + 1, 0x70); memcpy(sf + p + 3, "cur.lnk", 7); sf[p + 10] = 7; put_be32(sf + p + 11, 66);
+    p += 15;
+    put_be64(di_root + 56, p);
+
+    /* Inode 65 at block 8 + 1*512: regular file with 1 extent at block 20 */
+    const char *msg = "XFS v5 B+tree extent payload read cleanly!";
+    uint8_t *di_file = img.data + 8 * bsize + 512;
+    put_be16(di_file + 0, 0x494EU);
+    put_be16(di_file + 2, S_IFREG | 0644);
+    di_file[4] = 3;
+    di_file[5] = 2; /* EXTENTS */
+    put_be32(di_file + 16, 1);
+    put_be64(di_file + 56, strlen(msg));
+    put_be64(di_file + 64, 1);
+    put_be32(di_file + 76, 1); /* nextents = 1 */
+    xfs_pack_bmbt(di_file + 176, 0, 20, 1);
+    memcpy(img.data + 20 * bsize, msg, strlen(msg));
+
+    /* Inode 66 at block 8 + 2*512: inline symlink */
+    const char *lnk = "srv.log";
+    uint8_t *di_lnk = img.data + 8 * bsize + 1024;
+    put_be16(di_lnk + 0, 0x494EU);
+    put_be16(di_lnk + 2, S_IFLNK | 0777);
+    di_lnk[4] = 3;
+    di_lnk[5] = 1; /* LOCAL */
+    put_be32(di_lnk + 16, 1);
+    put_be64(di_lnk + 56, strlen(lnk));
+    memcpy(di_lnk + 176, lnk, strlen(lnk));
+
+    verify_file_and_link(&img, LEGACYFS_KIND_XFS, "/srv.log", msg, "/cur.lnk", lnk);
+    free(img.data);
+}
+
+/* 12. Synthetic Btrfs test (sys_chunk_array + ROOT_TREE -> FS_TREE + zlib extent + inline symlink) */
+static void btrfs_put_key(uint8_t p[17], uint64_t oid, uint8_t type, uint64_t off) {
+    put_le64(p + 0, oid);
+    p[8] = type;
+    put_le64(p + 9, off);
+}
+
+static void btrfs_put_inode(uint8_t d[160], uint32_t mode, uint64_t size) {
+    memset(d, 0, 160);
+    put_le64(d + 0, 1);
+    put_le64(d + 16, size);
+    put_le64(d + 24, 4096);
+    put_le32(d + 40, 1);
+    put_le32(d + 44, 1000);
+    put_le32(d + 48, 1000);
+    put_le32(d + 52, mode);
+    put_le64(d + 136, 1700000000ULL);
+}
+
+static void test_btrfs(void) {
+    const size_t sz = 256 * 1024;
+    mem_img_t img = { (uint8_t *)calloc(1, sz), sz };
+    const uint32_t nodesz = 4096;
+
+    /* Superblock at 65536: map logical 0x100000..+128K -> physical 131072 (128K) via sys_chunk_array */
+    uint8_t *sb = img.data + 65536;
+    memcpy(sb + 64, "_BHRfS_M", 8);
+    put_le64(sb + 80, 0x100000ULL);          /* tree_root logical */
+    put_le64(sb + 112, sz);                  /* total_bytes */
+    put_le64(sb + 120, 65536);               /* bytes_used */
+    put_le64(sb + 128, 256ULL);              /* root_dir_objectid = 256 */
+    put_le32(sb + 144, 4096);                /* sectorsize */
+    put_le32(sb + 148, nodesz);              /* nodesize */
+    strcpy((char *)sb + 299, "BTRFS_ARCHIVE");
+
+    /* sys_chunk_array at +811: 17B key + 80B single-stripe chunk = 97 bytes */
+    put_le32(sb + 160, 97U);
+    btrfs_put_key(sb + 811, 256ULL, 228U, 0x100000ULL);
+    uint8_t *ch = sb + 811 + 17;
+    put_le64(ch + 0, 131072ULL);  /* chunk length 128 KiB */
+    put_le16(ch + 44, 1U);        /* num_stripes = 1 */
+    put_le64(ch + 48 + 0, 1ULL);  /* devid = 1 */
+    put_le64(ch + 48 + 8, 131072ULL); /* physical offset = 131072 */
+
+    /* ROOT_TREE leaf at logical 0x100000 -> physical 131072: ROOT_ITEM for FS_TREE (5) -> logical 0x101000 */
+    uint8_t *rt = img.data + 131072;
+    put_le32(rt + 96, 1U); /* nritems = 1 */
+    rt[100] = 0;           /* leaf */
+    uint32_t ritem_sz = 200U;
+    uint32_t ritem_off = nodesz - 101U - ritem_sz;
+    btrfs_put_key(rt + 101, 5ULL, 132U, 0ULL);
+    put_le32(rt + 101 + 17, ritem_off);
+    put_le32(rt + 101 + 21, ritem_sz);
+    put_le64(rt + 101 + ritem_off + 176, 0x101000ULL); /* fs_tree bytenr */
+
+    /* Compress regular file payload into physical 139264 (logical 0x102000) */
+    const char *msg = "Btrfs copy-on-write zlib extent payload!";
+    uLongf clen = 512;
+    uint8_t cbuf[512];
+    assert(compress2(cbuf, &clen, (const Bytef *)msg, (uLong)strlen(msg), Z_BEST_COMPRESSION) == Z_OK);
+    memcpy(img.data + 139264, cbuf, clen);
+
+    /* FS_TREE leaf at logical 0x101000 -> physical 135168 */
+    const char *lnk = "snap.txt";
+    uint8_t *ft = img.data + 135168;
+    put_le32(ft + 96, 7U); /* 7 sorted items */
+    ft[100] = 0;
+    uint32_t cur = nodesz - 101U;
+
+    #define BTRFS_ADD_ITEM(idx, oid, ktype, koff, body_ptr, body_len) do { \
+        cur -= (uint32_t)(body_len); \
+        memcpy(ft + 101U + cur, (body_ptr), (body_len)); \
+        uint8_t *itp = ft + 101U + (size_t)(idx) * 25U; \
+        btrfs_put_key(itp, (oid), (ktype), (koff)); \
+        put_le32(itp + 17, cur); \
+        put_le32(itp + 21, (uint32_t)(body_len)); \
+    } while (0)
+
+    uint8_t ino_buf[160];
+    /* 0: (256, INODE_ITEM, 0) root dir */
+    btrfs_put_inode(ino_buf, S_IFDIR | 0755, 64);
+    BTRFS_ADD_ITEM(0, 256ULL, 1U, 0ULL, ino_buf, 160U);
+
+    /* 1: (256, DIR_INDEX, 2) -> "snap.txt" (257) */
+    uint8_t de1[38]; memset(de1, 0, sizeof(de1));
+    btrfs_put_key(de1, 257ULL, 1U, 0ULL);
+    put_le16(de1 + 27, 8); de1[29] = 1; memcpy(de1 + 30, "snap.txt", 8);
+    BTRFS_ADD_ITEM(1, 256ULL, 96U, 2ULL, de1, sizeof(de1));
+
+    /* 2: (256, DIR_INDEX, 3) -> "b.lnk" (258) */
+    uint8_t de2[35]; memset(de2, 0, sizeof(de2));
+    btrfs_put_key(de2, 258ULL, 1U, 0ULL);
+    put_le16(de2 + 27, 5); de2[29] = 7; memcpy(de2 + 30, "b.lnk", 5);
+    BTRFS_ADD_ITEM(2, 256ULL, 96U, 3ULL, de2, sizeof(de2));
+
+    /* 3: (257, INODE_ITEM, 0) regular file */
+    btrfs_put_inode(ino_buf, S_IFREG | 0644, strlen(msg));
+    BTRFS_ADD_ITEM(3, 257ULL, 1U, 0ULL, ino_buf, 160U);
+
+    /* 4: (257, EXTENT_DATA, 0) ZLIB regular extent at logical 0x102000 */
+    uint8_t ext1[53]; memset(ext1, 0, sizeof(ext1));
+    put_le64(ext1 + 8, strlen(msg)); /* ram_bytes */
+    ext1[16] = 1; /* ZLIB */
+    ext1[20] = 1; /* REG */
+    put_le64(ext1 + 21, 0x102000ULL);
+    put_le64(ext1 + 29, clen);
+    put_le64(ext1 + 37, 0);
+    put_le64(ext1 + 45, strlen(msg));
+    BTRFS_ADD_ITEM(4, 257ULL, 108U, 0ULL, ext1, sizeof(ext1));
+
+    /* 5: (258, INODE_ITEM, 0) symlink */
+    btrfs_put_inode(ino_buf, S_IFLNK | 0777, strlen(lnk));
+    BTRFS_ADD_ITEM(5, 258ULL, 1U, 0ULL, ino_buf, 160U);
+
+    /* 6: (258, EXTENT_DATA, 0) INLINE symlink */
+    uint8_t ext2[21 + 8]; memset(ext2, 0, sizeof(ext2));
+    put_le64(ext2 + 8, strlen(lnk));
+    ext2[16] = 0; ext2[20] = 0; /* INLINE */
+    memcpy(ext2 + 21, lnk, strlen(lnk));
+    BTRFS_ADD_ITEM(6, 258ULL, 108U, 0ULL, ext2, 21U + strlen(lnk));
+
+    #undef BTRFS_ADD_ITEM
+
+    verify_file_and_link(&img, LEGACYFS_KIND_BTRFS, "/snap.txt", msg, "/b.lnk", lnk);
+    free(img.data);
+}
+
+/* 13. Synthetic UDF test (2048B blocks, AVDP/PD/LVD/FSD/FE/FID + CS0 UTF-16BE + PathComponent symlink) */
+static void test_udf(void) {
+    const uint32_t bsize = 2048U;
+    const size_t sz = 300U * bsize;
+    mem_img_t img = { (uint8_t *)calloc(1, sz), sz };
+
+    /* VRS at 32768 (sector 16): NSR03 */
+    memcpy(img.data + 32769, "NSR03", 5);
+
+    /* AVDP (tag 2) at sector 256 -> MVDS at sector 32, length 4 blocks */
+    uint8_t *avdp = img.data + 256U * bsize;
+    put_le16(avdp + 0, 2U);
+    put_le32(avdp + 12, 256U);
+    put_le32(avdp + 16, 4U * bsize);
+    put_le32(avdp + 20, 32U);
+
+    /* PD (tag 5) at sector 32: partition starts at sector 64, length 200 blocks */
+    uint8_t *pd = img.data + 32U * bsize;
+    put_le16(pd + 0, 5U);
+    put_le32(pd + 188, 64U);
+    put_le32(pd + 192, 200U);
+
+    /* LVD (tag 6) at sector 33: logicalBlockSize = 2048, FSD at lbn 0, label "UDF_DISC" */
+    uint8_t *lvd = img.data + 33U * bsize;
+    put_le16(lvd + 0, 6U);
+    lvd[84] = 8; memcpy(lvd + 85, "UDF_DISC", 8); lvd[84 + 127] = 9;
+    put_le32(lvd + 212, bsize);
+    put_le32(lvd + 248 + 0, bsize);
+    put_le32(lvd + 248 + 4, 0U); /* FSD lbn = 0 */
+
+    /* TD (tag 8) at sector 34 */
+    put_le16(img.data + 34U * bsize, 8U);
+
+    /* Partition starts at sector 64:
+     * lbn 0 (sec 64): FSD -> root ICB at lbn 1
+     * lbn 1 (sec 65): Root Directory FE (inline FIDs for "video.txt" at lbn 2 and "u.lnk" at lbn 3)
+     * lbn 2 (sec 66): File FE (short_ad pointing to lbn 4)
+     * lbn 3 (sec 67): Symlink FE (inline PathComponent -> "video.txt")
+     * lbn 4 (sec 68): File data
+     */
+    uint8_t *fsd = img.data + 64U * bsize;
+    put_le16(fsd + 0, 256U);
+    put_le32(fsd + 400 + 0, bsize);
+    put_le32(fsd + 400 + 4, 1U); /* root ICB lbn = 1 */
+
+    /* Build FIDs:
+     * FID 0: CS0 16-bit UTF-16BE "video.txt" (1 + 18 = 19 bytes -> 38+19=57 -> padded to 60) -> lbn 2
+     * FID 1: CS0 8-bit "u.lnk" (1 + 5 = 6 bytes -> 38+6=44) -> lbn 3
+     */
+    uint8_t fids[104];
+    memset(fids, 0, sizeof(fids));
+    put_le16(fids + 0, 257U);
+    fids[18] = 0; /* regular file */
+    fids[19] = 19;
+    put_le32(fids + 20 + 0, bsize);
+    put_le32(fids + 20 + 4, 2U); /* child lbn = 2 */
+    fids[38] = 16; /* UTF-16BE */
+    const char *vname = "video.txt";
+    for (size_t i = 0; i < 9; i++) {
+        fids[39 + i * 2] = 0;
+        fids[39 + i * 2 + 1] = (uint8_t)vname[i];
+    }
+
+    uint8_t *fid2 = fids + 60;
+    put_le16(fid2 + 0, 257U);
+    fid2[18] = 0;
+    fid2[19] = 6;
+    put_le32(fid2 + 20 + 0, bsize);
+    put_le32(fid2 + 20 + 4, 3U); /* child lbn = 3 */
+    fid2[38] = 8;
+    memcpy(fid2 + 39, "u.lnk", 5);
+
+    uint8_t *rfe = img.data + 65U * bsize;
+    put_le16(rfe + 0, 261U); /* FE */
+    rfe[16 + 11] = 4;        /* dir */
+    put_le16(rfe + 16 + 18, 3U); /* inline AD_IN_ICB */
+    put_le64(rfe + 56, sizeof(fids));
+    put_le32(rfe + 172, sizeof(fids));
+    memcpy(rfe + 176, fids, sizeof(fids));
+
+    const char *msg = "UDF optical/archival media payload with UTF-16BE CS0!";
+    uint8_t *ffe = img.data + 66U * bsize;
+    put_le16(ffe + 0, 261U);
+    ffe[16 + 11] = 5;        /* reg */
+    put_le16(ffe + 16 + 18, 0U); /* short_ad */
+    put_le64(ffe + 56, strlen(msg));
+    put_le32(ffe + 172, 8U);
+    put_le32(ffe + 176 + 0, (uint32_t)strlen(msg));
+    put_le32(ffe + 176 + 4, 4U); /* lbn 4 */
+    memcpy(img.data + 68U * bsize, msg, strlen(msg));
+
+    /* Symlink PathComponent: type 5, len 10 (CS0 8-bit "video.txt") */
+    uint8_t pc[14];
+    memset(pc, 0, sizeof(pc));
+    pc[0] = 5U;
+    pc[1] = 10U;
+    pc[4] = 8U;
+    memcpy(pc + 5, "video.txt", 9);
+
+    uint8_t *lfe = img.data + 67U * bsize;
+    put_le16(lfe + 0, 261U);
+    lfe[16 + 11] = 12; /* symlink */
+    put_le16(lfe + 16 + 18, 3U); /* inline */
+    put_le64(lfe + 56, sizeof(pc));
+    put_le32(lfe + 172, sizeof(pc));
+    memcpy(lfe + 176, pc, sizeof(pc));
+
+    verify_file_and_link(&img, LEGACYFS_KIND_UDF, "/video.txt", msg, "/u.lnk", "video.txt");
+    free(img.data);
+}
+
 /* 11. Test all 27 Tier-2 Superblock & Container Probes + Malformed Input Rejection */
 static void assert_probe_kind(uint8_t *buf, size_t sz, legacyfs_kind_t expected) {
     mem_img_t m = { buf, sz };
@@ -843,7 +1164,13 @@ int main(void) {
     test_ufs2();
     printf("[legacyfs] Testing IBM JFS...\n");
     test_jfs();
-    printf("[legacyfs] Testing all 27 Tier-2 filesystem and container probes...\n");
+    printf("[legacyfs] Testing XFS v5...\n");
+    test_xfs();
+    printf("[legacyfs] Testing Btrfs (zlib + chunk map)...\n");
+    test_btrfs();
+    printf("[legacyfs] Testing UDF (CS0 UTF-16BE + PathComponent)...\n");
+    test_udf();
+    printf("[legacyfs] Testing all remaining filesystem and container probes...\n");
     test_tier2_probes_and_fuzz_bounds();
     printf("[legacyfs] All 37 filesystem and container tests passed.\n");
     return 0;
